@@ -1,61 +1,51 @@
-from flask import Flask, request
-import os, zipfile, shutil, subprocess
-
-app = Flask(__name__)
-UPLOAD_DIR = "/data/upload"
-DEST_DUMPS = "/data/dumps"
-DEST_FILESTORE = "/data/filestore"
-DEST_MANIFEST = "/data/manifest.json"
-
-# Assure les dossiers nécessaires
-os.makedirs(UPLOAD_DIR, exist_ok=True)
-os.makedirs(DEST_DUMPS, exist_ok=True)
-os.makedirs(DEST_FILESTORE, exist_ok=True)
-
-@app.route("/")
-def index():
-    here = os.path.dirname(__file__)
-    return open(os.path.join(here, 'index.html'), 'r', encoding='utf-8').read()
-
 @app.route("/upload", methods=["POST"])
 def upload_zip():
-    zip_obj = request.files.get('zipfile')
-    if not zip_obj or not zip_obj.filename.lower().endswith('.zip'):
-        return "⚠️ Merci de déposer un fichier .zip valide."
+    zipfile_obj = request.files.get('zipfile')
+    if not zipfile_obj or not zipfile_obj.filename.endswith(".zip"):
+        return "⚠️ Merci de déposer une archive .zip valide."
 
-    archive_path = os.path.join(UPLOAD_DIR, 'archive.zip')
-    zip_obj.save(archive_path)
+    zip_path = os.path.join(UPLOAD_DIR, "archive.zip")
+    zipfile_obj.save(zip_path)
 
-    tmp_dir = os.path.join(UPLOAD_DIR, 'extracted')
-    shutil.rmtree(tmp_dir, ignore_errors=True)
-    os.makedirs(tmp_dir, exist_ok=True)
-    with zipfile.ZipFile(archive_path, 'r') as z:
-        z.extractall(tmp_dir)
+    # Préparer le dossier d'extraction
+    extract_dir = os.path.join(UPLOAD_DIR, "extracted")
+    shutil.rmtree(extract_dir, ignore_errors=True)
+    os.makedirs(extract_dir, exist_ok=True)
 
-    # dump.sql obligatoire
-    dump_src = os.path.join(tmp_dir, 'dump.sql')
-    if not os.path.isfile(dump_src):
-        return "❌ dump.sql manquant dans l'archive."
-    shutil.copy2(dump_src, os.path.join(DEST_DUMPS, 'dump.sql'))
+    # Décompresser
+    with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+        zip_ref.extractall(extract_dir)
 
-    # filestore facultatif
-    fs_src = os.path.join(tmp_dir, 'filestore')
-    shutil.rmtree(DEST_FILESTORE, ignore_errors=True)
-    if os.path.isdir(fs_src):
+    # Copier dump.sql
+    dump_src = os.path.join(extract_dir, "dump.sql")
+    if not os.path.exists(dump_src):
+        return "❌ Le fichier dump.sql est manquant dans l’archive."
+    os.makedirs(DEST_DUMPS, exist_ok=True)
+    shutil.copy2(dump_src, DUMP_TARGET)
+    print("✅ dump.sql copié.")
+
+    # Copier filestore
+    fs_src = os.path.join(extract_dir, "filestore")
+    if os.path.exists(fs_src):
+        # Supprimer l'ancien filestore s'il existe
+        shutil.rmtree(DEST_FILESTORE, ignore_errors=True)
+        # Copier le nouveau
         shutil.copytree(fs_src, DEST_FILESTORE)
+        print("✅ filestore copié.")
+    else:
+        print("⚠️ Aucun filestore détecté dans l’archive.")
 
-    # manifest facultatif
-    mf_src = os.path.join(tmp_dir, 'manifest.json')
-    if os.path.isfile(mf_src):
-        shutil.copy2(mf_src, DEST_MANIFEST)
+    # Copier manifest.json s'il existe
+    manifest_src = os.path.join(extract_dir, "manifest.json")
+    if os.path.exists(manifest_src):
+        shutil.copy2(manifest_src, DEST_MANIFEST)
+        print("✅ manifest.json copié.")
+    else:
+        print("ℹ️ Aucun manifest.json fourni.")
 
-    # Lancer migration en arrière-plan
+    # Lancer la migration
     try:
         subprocess.Popen(["python3", "/app/scripts/run_migration.py"])
+        return "✅ Archive traitée. La migration a été lancée. Suivez les logs via Docker."
     except Exception as e:
-        return f"❌ Erreur lancement migration : {e}"
-
-    return "✅ Migration lancée ! Suivez les logs via Docker."
-
-if __name__ == "__main__":
-    app.run(host='0.0.0.0', port=8080)
+        return f"❌ Erreur lors du lancement de la migration : {e}"

@@ -13,6 +13,22 @@ Odoo Community Edition 12 vers la version 18 à l'aide d'OpenUpgrade.
 3. Une fois le fichier envoyé, la migration se lance automatiquement. Consultez
    les logs du conteneur `web` pour suivre l'avancement.
 
+### Obtention d'OpenUpgrade
+
+Clonez les dépôts OpenUpgrade pour chaque version souhaitée (13.0 à 18.0) dans
+le répertoire `/app/openupgrade` (modifiable via `openupgrade_base`):
+
+```bash
+mkdir -p /app/openupgrade
+cd /app/openupgrade
+git clone -b 13.0 https://github.com/OCA/OpenUpgrade.git openupgrade_13
+git clone -b 14.0 https://github.com/OCA/OpenUpgrade.git openupgrade_14
+git clone -b 15.0 https://github.com/OCA/OpenUpgrade.git openupgrade_15
+git clone -b 16.0 https://github.com/OCA/OpenUpgrade.git openupgrade_16
+git clone -b 17.0 https://github.com/OCA/OpenUpgrade.git openupgrade_17
+git clone -b 18.0 https://github.com/OCA/OpenUpgrade.git openupgrade_18
+```
+
 ### Exemple de manifest
 
 ```json

@@ -1,0 +1,20 @@
+# Ignore data directory
+data/
+
+# Byte-compiled / cache files
+__pycache__/
+*.pyc
+*.py[cod]
+
+# Distribution / packaging
+*.egg-info/
+dist/
+build/
+
+# Misc
+.DS_Store
+*.log
+*.sqlite
+
+# Environment
+.env

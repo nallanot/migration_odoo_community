@@ -5,28 +5,37 @@ import time
 import json
 
 def run_migration():
-    # --- Chargement du manifest ou valeur par défaut ---
+    """Lance la migration en utilisant le manifest s'il est présent."""
+
     manifest_path = "/data/manifest.json"
+    manifest = {}
     if os.path.exists(manifest_path):
         with open(manifest_path, "r") as f:
             manifest = json.load(f)
-            raw_name = manifest.get("db_name", "odoo_migrated")
-            print("📄 Manifest détecté :")
-            print(json.dumps(manifest, indent=2))
+        raw_name = manifest.get("db_name", "odoo_migrated")
+        print("📄 Manifest détecté :")
+        print(json.dumps(manifest, indent=2))
     else:
         raw_name = "odoo_migrated"
     # Normalisation du nom (minuscules, underscores)
     db_name = raw_name.lower().replace(" ", "_")
 
     dump_path = "/data/dumps/dump.sql"
-    db_user = os.environ.get("POSTGRES_USER", "odoo")          # superutilisateur et user Odoo
+    db_user = manifest.get("db_user", os.environ.get("POSTGRES_USER", "odoo"))
     admin_user = db_user
-    admin_pass = os.environ.get("POSTGRES_PASSWORD", "odoo")
-    db_host = os.environ.get("DB_HOST", "db")
+    admin_pass = manifest.get(
+        "db_password", os.environ.get("POSTGRES_PASSWORD", "odoo")
+    )
+    db_host = manifest.get("db_host", os.environ.get("DB_HOST", "db"))
     filestore_path = "/data/filestore"
+    versions = manifest.get(
+        "versions",
+        ["13.0", "14.0", "15.0", "16.0", "17.0", "18.0"],
+    )
+    openupgrade_base = manifest.get("openupgrade_base", "/app/openupgrade")
 
     print(f"\n🔄 Base cible : {db_name} | Version initiale : 12.0")
-    print("📈 Plan de migration : 12.0 ➜ 13.0 ➜ 14.0 ➜ 15.0 ➜ 16.0 ➜ 17.0 ➜ 18.0")
+    print("📈 Plan de migration : 12.0 ➜ " + " ➜ ".join(versions))
 
     # Vérification du filestore
     if not os.path.isdir(filestore_path) or not os.listdir(filestore_path):
@@ -90,14 +99,13 @@ def run_migration():
     print("✅ Dump restauré avec succès.")
 
     # --- MIGRATIONS OPENUPGRADE ---
-    versions = ["13.0","14.0","15.0","16.0","17.0","18.0"]
     for ver in versions:
-        run_openupgrade(ver, db_name)
+        run_openupgrade(ver, db_name, openupgrade_base)
 
 
-def run_openupgrade(version, db_name):
+def run_openupgrade(version, db_name, base_path):
     print(f"🚀 Migration vers Odoo {version}")
-    odoo_path = f"/app/openupgrade/{version}"
+    odoo_path = f"{base_path}/{version}"
     env = os.environ.copy()
     subprocess.run([
         'python3', f'{odoo_path}/odoo-bin',

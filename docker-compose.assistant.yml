@@ -1,0 +1,24 @@
+# À lancer depuis la racine du dépôt :
+# docker compose -f docker-compose.assistant.yml up -d --build
+services:
+  assistant:
+    build:
+      context: ./odoo-migration-gui
+    image: odoo-migration-assistant:local
+    restart: unless-stopped
+    command: ["--bind", "0.0.0.0", "--workdir", "${ODOO_MIGRATION_HOME:-/opt/odoo-migration}"]
+    environment:
+      DOCKER_HOST: unix:///var/run/docker.sock
+      PYTHONDONTWRITEBYTECODE: "1"
+      HOME: ${ODOO_MIGRATION_HOME:-/opt/odoo-migration}/.home
+    ports:
+      - "127.0.0.1:8765:8765"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      # Même chemin absolu dans le conteneur et sur l'hôte : requis pour docker cp/build.
+      - ${ODOO_MIGRATION_HOME:-/opt/odoo-migration}:${ODOO_MIGRATION_HOME:-/opt/odoo-migration}
+    read_only: true
+    tmpfs:
+      - /tmp:rw,nosuid,size=128m
+    security_opt:
+      - no-new-privileges:true

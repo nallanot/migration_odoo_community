@@ -54,10 +54,15 @@ class Engine:
         self.busy = False
         self.progress = "Prêt"
         self.state = {"version": 12, "validated": True, "backup": None,
-                      "prepared": None, "pending": None, "error": None}
+                      "prepared": None, "pending": None, "error": None,
+                      "automation": {"running": False, "stage": "", "blocker": None}}
         self.statefile = self.root / "state.json"
         if self.statefile.exists():
             self.state.update(json.loads(self.statefile.read_text()))
+        if self.state.get("automation", {}).get("running"):
+            self.state["automation"] = {"running": False, "stage": "Interrompue",
+                "blocker": "L'assistant a redémarré pendant une opération. Vérifier les conteneurs et relancer l'automatisation."}
+            self.save()
         self.source = {"app": "odoo12", "db": "odoo12-db", "database": "NicolasAllanot"}
 
     def save(self):
@@ -502,7 +507,8 @@ print(json.dumps({'modules':mods,'paths':sorted(paths)}))
 
     def validate(self, payload):
         pending = self.state["pending"]
-        if not pending or not payload.get("ack_business"):
+        automated = bool(payload.get("_technical_auto") and self.state.get("automation", {}).get("running"))
+        if not pending or not (payload.get("ack_business") or automated):
             raise ValueError("Contrôler factures, ventes, pièces jointes et comptes avant de valider.")
         note = str(payload.get("validation_note", "")).strip()
         if len(note) < 15:
@@ -532,7 +538,8 @@ print(json.dumps({'modules':mods,'paths':sorted(paths)}))
         metrics = self.metrics(work["db"], "migration")
         validation = {"version": pending["version"], "note": note, "before": pending["before"],
                       "after": metrics, "decisions": pending["decisions"], "commits": pending["commits"],
-                      "image": pending["image"], "dump_sha256": hashlib.sha256(dump.read_bytes()).hexdigest()}
+                      "image": pending["image"], "technical_only": automated,
+                      "dump_sha256": hashlib.sha256(dump.read_bytes()).hexdigest()}
         write_json(checkpoint_folder / "validation.json", validation)
         self.state.update(version=pending["version"], checkpoint=str(dump), data=str(data),
             validated=True, metrics=metrics, modules=self.modules(work["db"], "migration"), pending=None, prepared=None)
@@ -554,8 +561,75 @@ print(json.dumps({'modules':mods,'paths':sorted(paths)}))
         self.save()
         self.log("Essai rejeté. La prochaine migration repartira du point validé précédent.")
 
+    def autopilot(self, payload):
+        """Enchaîne les étapes vérifiables; s'arrête dès qu'une décision métier est requise."""
+        if not payload.get("ack_auto"):
+            raise ValueError("Confirmer l'arrêt temporaire pour sauvegarde et le contrôle automatique des copies.")
+        auto = self.state["automation"] = {"running": True, "stage": "Diagnostic", "blocker": None}
+        self.save()
+        try:
+            if not self.state.get("audit"):
+                self.audit(payload)
+            if not self.state.get("backup"):
+                auto["stage"] = "Sauvegarde de production"
+                self.save()
+                self.backup({"ack_pause": True})
+            while self.state["version"] < 19:
+                pending = self.state.get("pending")
+                if pending:
+                    auto["stage"] = "Contrôle Odoo " + str(pending["version"])
+                    self.save()
+                    before, after = pending["before"], pending["metrics"]
+                    differences = [k for k in before if before[k] != after.get(k)]
+                    old = {m["name"] for m in self.state["modules"] if m["state"] == "installed"}
+                    new = {m["name"] for m in pending["modules"] if m["state"] == "installed"}
+                    lost = sorted(old - new)
+                    if differences or lost:
+                        raise ValueError("Validation manuelle requise : écarts " +
+                            ", ".join(differences) + "; modules non installés " + ", ".join(lost))
+                    # Cette validation automatise l'intégrité technique seulement.
+                    if pending["version"] == 19:
+                        self.preview({})
+                    self.validate({"_technical_auto": True,
+                        "validation_note": "Contrôle technique automatisé : compteurs, totaux, modules et fichiers de pièces jointes cohérents."})
+                    if self.state["version"] == 19:
+                        self.run(["docker", "start", pending["work"]["prefix"] + "-preview"])
+                    continue
+                if not self.state.get("validated"):
+                    raise ValueError("Une étape en attente doit être examinée avant reprise.")
+                target = self.state["version"] + 1
+                auto["stage"] = "Préparation Odoo " + str(target)
+                self.save()
+                prepared = self.state.get("prepared")
+                blocked_addons = (prepared and (prepared["missing"] or any(
+                    not prepared["inventory"]["modules"][name]["scripts"]
+                    for name in prepared["external"])))
+                if not prepared or prepared["target"] != target or blocked_addons:
+                    self.prepare({})
+                    prepared = self.state["prepared"]
+                if prepared["missing"]:
+                    raise ValueError("Modules sans code compatible pour Odoo " + str(target) +
+                        " : " + ", ".join(prepared["missing"]) +
+                        ". Ajouter les adaptations dans extra/" + str(target) + " et relancer l'automatisation.")
+                without_scripts = [name for name in prepared["external"]
+                    if not prepared["inventory"]["modules"][name]["scripts"]]
+                if without_scripts:
+                    raise ValueError("Modules tiers sans scripts de migration détectés pour Odoo " +
+                        str(target) + " : " + ", ".join(without_scripts))
+                auto["stage"] = "Migration Odoo " + str(target)
+                self.save()
+                self.migrate({"ack_coverage": True, "decisions": {}})
+            auto["stage"] = "Odoo 19 prêt sur la copie de test"
+            self.log("Chaîne automatisée terminée. Vérifier les processus métier avant un basculement de production.")
+        except Exception as error:
+            auto["blocker"] = str(error)
+            raise
+        finally:
+            auto["running"] = False
+            self.save()
+
     def dispatch(self, action, payload):
-        if action not in ("audit", "backup", "prepare", "migrate", "preview", "validate", "retry"):
+        if action not in ("audit", "backup", "prepare", "migrate", "preview", "validate", "retry", "autopilot"):
             raise ValueError("Action inconnue")
         if not self.lock.acquire(blocking=False):
             raise ValueError("Une opération est déjà en cours.")
@@ -581,6 +655,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--workdir", default=str(HERE / "work"))
     parser.add_argument("--port", default=8765, type=int)
+    parser.add_argument("--bind", default="127.0.0.1", choices=("127.0.0.1", "0.0.0.0"))
     args = parser.parse_args()
     os.umask(0o077)
     # Empêche deux assistants de manipuler la même session.
@@ -646,7 +721,7 @@ def main():
                 self.send(400, {"error": str(error)})
     print("Assistant : http://127.0.0.1:" + str(args.port) + "/#" + token, flush=True)
     print("Pour un accès distant : tunnel SSH vers les ports " + str(args.port) + " et 18069.", flush=True)
-    http.server.ThreadingHTTPServer(("127.0.0.1", args.port), Handler).serve_forever()
+    http.server.ThreadingHTTPServer((args.bind, args.port), Handler).serve_forever()
 
 
 if __name__ == "__main__":

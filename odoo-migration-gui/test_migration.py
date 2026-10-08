@@ -40,6 +40,57 @@ class EngineTests(unittest.TestCase):
                 self.engine.migrate({'ack_coverage': True})
             pg.assert_not_called()
 
+    def test_autopilot_stops_before_migration_on_missing_module(self):
+        self.engine.state.update(audit={'modules': []}, backup='/backup', version=12,
+            prepared={'target': 13, 'missing': ['om_account_asset'], 'external': []})
+        with patch.object(self.engine, 'migrate') as migrate, patch.object(self.engine, 'prepare') as prepare:
+            with self.assertRaisesRegex(ValueError, 'om_account_asset'):
+                self.engine.autopilot({'ack_auto': True})
+            migrate.assert_not_called()
+            prepare.assert_called_once()  # Rebuild après ajout éventuel d'addons.
+        self.assertFalse(self.engine.state['automation']['running'])
+        self.assertIn('om_account_asset', self.engine.state['automation']['blocker'])
+
+    def test_autopilot_stops_on_changed_accounting_totals(self):
+        self.engine.state.update(audit={'modules': []}, backup='/backup', version=12,
+            modules=[{'name': 'base', 'state': 'installed'}], metrics={'debit': '100'},
+            pending={'version': 13, 'before': {'debit': '100'}, 'metrics': {'debit': '98'},
+                     'modules': [{'name': 'base', 'state': 'installed'}]})
+        with patch.object(self.engine, 'validate') as validate:
+            with self.assertRaisesRegex(ValueError, 'debit'):
+                self.engine.autopilot({'ack_auto': True})
+            validate.assert_not_called()
+        self.assertEqual(self.engine.state['version'], 12)
+
+    def test_autopilot_finishes_last_step_and_opens_copy(self):
+        self.engine.state.update(audit={'modules': []}, backup='/backup', version=18,
+            modules=[{'name': 'base', 'state': 'installed'}], metrics={'contacts': '10'},
+            prepared={'target': 19, 'missing': [], 'external': []}, pending=None)
+        def simulate_migration(payload):
+            self.engine.state['pending'] = {'version': 19, 'before': {'contacts': '10'},
+                'metrics': {'contacts': '10'}, 'modules': [{'name': 'base', 'state': 'installed'}],
+                'work': {'prefix': 'omig-test'}}
+        def simulate_validation(payload):
+            self.assertTrue(payload.get('_technical_auto'))
+            self.engine.state.update(version=19, pending=None)
+        with patch.object(self.engine, 'migrate', side_effect=simulate_migration) as migrate, \
+             patch.object(self.engine, 'validate', side_effect=simulate_validation) as validate, \
+             patch.object(self.engine, 'preview') as preview, \
+             patch.object(self.engine, 'run', return_value='') as run:
+            self.engine.autopilot({'ack_auto': True})
+        migrate.assert_called_once()
+        validate.assert_called_once()
+        preview.assert_called_once()
+        run.assert_called_with(['docker', 'start', 'omig-test-preview'])
+        self.assertIsNone(self.engine.state['automation']['blocker'])
+
+    def test_interrupted_automation_is_marked_for_review(self):
+        self.engine.state['automation'] = {'running': True, 'stage': 'Migration Odoo 13', 'blocker': None}
+        self.engine.save()
+        restarted = Engine(self.tmp.name)
+        self.assertFalse(restarted.state['automation']['running'])
+        self.assertIn('redémarré', restarted.state['automation']['blocker'])
+
     def test_coverage_acknowledgement_required(self):
         self.engine.state['prepared'] = {'target': 13, 'missing': []}
         with patch.object(self.engine, 'run', return_value=''), patch.object(self.engine, 'start_pg') as pg:

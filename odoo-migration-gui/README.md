@@ -1,187 +1,52 @@
-# Assistant graphique de migration Odoo Community 12 → 19
+# Assistant graphique de migration Odoo Community
 
-Assistant à lancer **sur ton serveur Ubuntu hébergeant Docker**. Interface dans
-le navigateur, Python sans dépendance externe. Il prépare et exécute les étapes
-OpenUpgrade 12→13→14→15→16→17→18→19, avec un contrôle humain entre chaque étape.
-Ce n'est pas une garantie de compatibilité des modules tiers : les extensions
-comptables et autres modules doivent disposer de code et scripts adaptés à chaque version.
+Assistant local pour migrer une base Odoo Community à travers les versions majeures avec OpenUpgrade. La migration s'effectue sur des copies Docker indépendantes. L'interface permet le diagnostic, la sauvegarde, l'exécution, l'examen des écarts et la reprise d'une étape.
 
-## Démarrer
+## Déployer avec Docker Compose
 
-1. Copier et extraire `odoo-migration-gui.zip` sur le serveur Ubuntu.
-2. Dans le dossier extrait :
+Depuis la racine du dépôt :
 
 ```bash
-chmod +x lancer.sh
-./lancer.sh
+docker compose -f docker-compose.assistant.yml up -d --build
+docker compose -f docker-compose.assistant.yml logs assistant
 ```
 
-Prérequis : Python **3.9 ou supérieur**, Docker accessible à ton compte, Git,
-Internet pour GitHub/PyPI/Docker Hub. Aucune installation pip sur l'hôte.
-Les images anciennes peuvent demander des correctifs de dépendances Python.
-Prévoir au minimum 20 Gio libres, davantage si le filestore est volumineux ;
-plusieurs copies et images sont conservées. `./lancer.sh --workdir /chemin/stockage/odoo-migration`
-permet de choisir un disque local adapté. Ne pas utiliser le répertoire de données
-PostgreSQL de production.
+Dans un gestionnaire de stacks Git, sélectionner explicitement `docker-compose.assistant.yml`. Le dépôt étant privé, le gestionnaire doit disposer d'un accès Git valide.
 
-Le terminal affiche un lien `http://127.0.0.1:8765/#…` contenant un jeton privé.
-Garder ce terminal ouvert pendant les opérations. Relancer avec le même dossier
-de travail reprend les points validés et les essais en attente.
+La stack conserve son travail dans `/opt/odoo-migration` sur l'hôte. Pour choisir un autre disque, définir `ODOO_MIGRATION_HOME` avec un chemin absolu local avant de déployer. Ce dossier contient des sauvegardes et des secrets : réserver son accès aux administrateurs et le sauvegarder sur un autre support. L'assistant utilise le socket Docker pour créer ses conteneurs de travail ; les personnes ayant accès à son interface ou à son jeton disposent indirectement de privilèges Docker.
 
-Depuis un autre ordinateur, ouvrir un deuxième terminal :
+L'interface écoute sur `127.0.0.1:8765` de l'hôte. Le journal du conteneur affiche son lien avec jeton. Depuis un ordinateur distant, ouvrir un tunnel SSH vers les ports de l'interface et de la copie de test :
 
 ```bash
-ssh -L 8765:127.0.0.1:8765 -L 18069:127.0.0.1:18069 ubuntu@IP_DU_SERVEUR
+ssh -L 8765:127.0.0.1:8765 -L 18069:127.0.0.1:18069 utilisateur@serveur
 ```
 
-Puis ouvrir **le lien complet affiché par l'assistant** sur cet ordinateur.
-Le tunnel doit rester ouvert. Depuis un iPad, utiliser un client SSH prenant
-en charge les tunnels locaux. Les ports 8765 et 18069 sont limités à localhost ;
-ne pas placer l'assistant derrière Traefik ou l'exposer sur Internet.
+Ouvrir ensuite le lien complet du journal dans le navigateur du poste possédant le tunnel. Garder le tunnel ouvert pendant l'utilisation.
 
-## Parcours adapté à ton installation
+## Lancement automatique
 
-- Conteneur Odoo : `odoo12`.
-- Conteneur SQL : `odoo12-db` (`postgres:10`).
-- Base à migrer : `NicolasAllanot`.
-- Base secondaire `AllanotNicolas` : sauvegardée avec les autres bases non système,
-  sans être traitée comme une base Odoo initialisée.
+Saisir les noms des deux conteneurs et de la base dans le diagnostic, puis cocher l'autorisation de sauvegarde. Le bouton « Tout lancer automatiquement » enchaîne les étapes de la version 12 jusqu'à la version 19. La capture initiale arrête temporairement l'application source pour garder la base et les fichiers synchronisés, puis la redémarre. Les migrations suivantes utilisent seulement des copies isolées.
 
-1. **Diagnostic** : image, version de base, modules actifs, chemins et espace libre.
-2. **Sauvegarde** : autoriser une interruption de quelques minutes, variable
-   selon la taille du conteneur et du filestore. Odoo est arrêté ; toutes les bases
-   métier sont dumpées ; les volumes applicatifs et chemins d'addons configurés
-   sont copiés. L'export du système de fichiers préserve les modifications et
-   dépendances hors volumes. La configuration Docker complète est enregistrée
-   dans un fichier privé. Odoo est redémarré dans un bloc `finally`, même en cas
-   d'erreur de sauvegarde (si Docker reste disponible).
-3. **Préparer** : construire l'image de la version suivante. Les commits téléchargés
-   sont figés dans le dossier de travail ; les relances réutilisent ces sources.
-4. **Revoir les modules** : suivre le lien de couverture OCA et analyser les modules
-   absents ou tiers. La simple présence d'un module ne prouve pas sa compatibilité.
-5. **Migrer** : chaque essai restaure le dernier dump validé sur une nouvelle base,
-   compare les compteurs avant migration et duplique le filestore.
-6. **Contrôler** : démarrer la copie de test et examiner factures, paiements,
-   rapports, contacts, ventes, employés et pièces jointes avec les comptes existants.
-7. **Valider** : noter les contrôles et expliquer les écarts. Le serveur vérifie
-   l'existence des fichiers référencés par les pièces jointes et capture un nouveau
-   dump + filestore. La copie web est arrêtée avant cette capture.
-8. Reprendre à « Préparer » pour l'étape suivante.
+L'assistant s'arrête lorsque le code d'un module manque, qu'un module tiers n'a pas de scripts de migration détectables, qu'une commande échoue, ou qu'un compteur ou total diverge. Il laisse intact le dernier point validé. Ajouter le code adapté dans `<dossier_de_travail>/extra/<version>/`, examiner les écarts, puis relancer. Une présence de script ne garantit pas la correction fonctionnelle : vérifier les factures, les paiements, les droits d'accès, les flux métier et les pièces jointes avant tout basculement.
 
-La première restauration prouve que le dump principal est exploitable et que
-les compteurs/totaux sélectionnés concordent. Les dumps secondaires sont conservés,
-mais leur restauration n'est pas testée automatiquement. Les comptes et totaux
-globaux ne remplacent pas les validations métier par société, devise et période.
-Les données de facturation changent notamment de modèle entre 12 et 13.
+Les versions intermédiaires enregistrent leurs dumps et filestores dans `checkpoints/`. Les essais et leurs journaux sont dans `runs/`. Les codes OpenUpgrade figés et les images construites sont dans `build/`. Les ressources de test portent l'étiquette Docker `odoo.migration=local`. La copie finale est servie sur le port de test 18069. La mise en production est une opération distincte à planifier après les contrôles métier.
 
-## Modules tiers et modules retirés
+L'automatisation ne désinstalle pas les modules manquants ni ne transforme une fusion métier supposée en migration SQL. Les renommages, fusions ou modules tiers nécessitant des adaptations peuvent être traités avec les contrôles manuels de l'interface. Cette limite évite de valider automatiquement une perte de données.
 
-Tu as notamment `om_account_accountant`, `om_account_asset`, `om_account_budget`,
-`accounting_pdf_reports`, `backend_theme_v12`, `sinerkia_jitsi_meet`,
-`prt_report_attachment_preview`, `quick_language_selection` et `web_responsive`.
-**Il est probable que le premier essai soit bloqué tant que leur traitement
-n'est pas préparé.** Le programme ne les désinstalle pas et ne les efface pas du SQL.
+## Mode local sans conteneur
 
-Mettre les modules adaptés dans :
-
-```text
-work/extra/13/nom_module/__manifest__.py
-work/extra/14/depot_oca/nom_module/__manifest__.py
-```
-
-Puis reconstruire l'image avec le bouton « Préparer ». Ne pas copier aveuglément
-les modules 12 dans 13 : migrer leur code, les données et les dépendances externes.
-Le Dockerfile est généré dans `work/build/<version>/Dockerfile`. Il peut être
-ajusté pour ajouter des bibliothèques, puis construit manuellement avec
-`docker build -t odoo-migration-local:13 work/build/13`. Pour faire enregistrer
-l'image modifiée dans l'assistant sans perdre les adaptations, copier le Dockerfile
-adapté vers `work/build/13/Dockerfile.custom`, puis cliquer sur « Préparer ».
-L'assistant réutilise ce fichier personnalisé et enregistre l'image obtenue.
-
-Pour un module absent dont OpenUpgrade traite réellement la suppression/fusion :
-
-```json
-{
-  "web_settings_dashboard": {
-    "action": "openupgrade",
-    "evidence": "Couverture OCA 12→13 : fusion dans base_setup ; scripts vérifiés."
-  }
-}
-```
-
-Cette déclaration ne crée aucun script et n'effectue aucune suppression.
-Elle consigne ta vérification et lève le blocage de présence. Une affirmation
-inexacte peut laisser des données non migrées : seul le code OpenUpgrade/tiers
-réellement présent effectue le travail. À partir de 14, les actions `rename` et
-`merge` permettent de transmettre des mappings privés aux mécanismes OpenUpgrade,
-avec un module `target` présent et une `evidence` documentée. Elles demandent une
-analyse et, généralement, des scripts métier ; elles ne constituent pas une
-solution automatique aux modules comptables manquants.
-
-Les renommages/fusions détectés dans `apriori.py` sont affichés comme aide.
-Les scripts OCA peuvent aussi traiter des retraits ailleurs ; l'assistant ne
-déduit pas une couverture complète de la présence de ce fichier. Même quand
-aucun module n'est absent, la couverture officielle doit être vérifiée.
-
-## Docker et isolation
-
-- Pas d'accès au réseau Traefik ou aux volumes de production pour les essais.
-- PostgreSQL isolé : version 14 pour cibles 13–15, version 16 pour 16–19.
-  Chaque passage restaure un dump logique ; les fichiers PostgreSQL 10 ne sont
-  jamais montés sur une version récente.
-- OpenUpgrade 13 : fork complet, exécuté avec `odoo-bin`.
-- OpenUpgrade 14–19 : image Odoo officielle, framework et scripts OCA,
-  `--load=base,web,openupgrade_framework`, `--upgrade-path`, `--update all`.
-- Réseaux internes Docker sans sortie réseau pour la copie ; tâches planifiées,
-  serveurs de courriels et collecte des courriels désactivés sur la copie.
-  Les intégrations et OAuth nécessitant Internet ne fonctionneront pas dans ce test.
-- Identifiants PostgreSQL aléatoires et configuration privée ; serveur Odoo
-  exécuté avec l'utilisateur `odoo`.
-- L'assistant possède les droits de ton compte Docker : réserver son jeton
-  et son dossier de travail aux administrateurs de ce serveur.
-
-## Reprise, journaux et sauvegardes
-
-- `work/backups/` : capture initiale, dumps, filestore, addons et manifeste SHA-256.
-  Copier cette sauvegarde sur un stockage indépendant avant de poursuivre.
-- `work/checkpoints/` : dumps et filestores validés version par version.
-- `work/runs/` : essais, configurations privées et journal complet OpenUpgrade.
-- `work/assistant.log` : journal de l'assistant.
-- `work/build/` : sources Git figées, Dockerfiles, inventaires et commits.
-
-Une relance après un échec technique utilise le checkpoint précédent, jamais
-une base partiellement migrée. Pour un essai techniquement terminé mais incorrect,
-« Rejeter cet essai » permet de recommencer depuis ce checkpoint.
-Après une interruption de l'assistant, vérifier Docker : le processus de migration
-peut continuer. L'assistant bloque les nouveaux essais tant qu'un conteneur
-`*-upgrade` étiqueté `odoo.migration=local` tourne encore. Un essai terminé pendant
-une interruption peut être relancé depuis le dernier checkpoint ; il n'est pas
-promu automatiquement. Ne pas interrompre le serveur pendant la capture initiale.
-
-Les ressources des essais ne sont **pas supprimées automatiquement**. Pour les
-identifier sans toucher à la production :
+Python 3.9+, Git et Docker sont nécessaires sur l'hôte. Dans ce dossier :
 
 ```bash
-docker ps -a --filter label=odoo.migration=local
-docker volume ls --filter label=odoo.migration=local
-docker network ls --filter label=odoo.migration=local
+./lancer.sh --workdir /chemin/stockage/migration
 ```
 
-Ne supprimer que les ressources identifiées après sauvegarde et clôture des tests.
-Après la validation 19, préparer une nouvelle capture récente pour la répétition
-finale et planifier le basculement (Traefik, domaine, accès, courriels et sauvegardes).
-Cet assistant **ne remplace pas la production** et ne réactive pas les intégrations.
+Le lien local est affiché dans le terminal. L'option `--bind` permet au conteneur de servir l'interface ; l'exposition réseau de l'hôte reste limitée par Compose.
 
-## Vérifications du paquet
+## Tests
 
 ```bash
 python3 -m unittest -v test_migration.py
 ```
 
-Les tests vérifient l'isolation des commandes, les blocages, la restauration,
-la reprise et l'authentification HTTP. Aucune migration de ta base n'a été
-effectuée lors de la création de ce paquet ; un essai réel sur ton serveur reste requis.
-
-Sources : [OCA – exécution des migrations](https://oca.github.io/OpenUpgrade/040_run_migration.html),
-[couverture par version](https://oca.github.io/OpenUpgrade/),
-[OpenUpgrade](https://github.com/OCA/OpenUpgrade).
+Les tests couvrent les blocages, la copie de sauvegarde, les points de reprise, la vérification des pièces jointes et l'authentification HTTP. Une migration réelle sur les données source n'est pas simulée par ces tests. Consulter la [documentation d'exécution OpenUpgrade](https://oca.github.io/OpenUpgrade/040_run_migration.html) et la [couverture par version](https://oca.github.io/OpenUpgrade/).

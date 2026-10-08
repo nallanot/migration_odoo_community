@@ -8,9 +8,11 @@ import time
 import unittest
 import urllib.error
 import urllib.request
+import zipfile
 from unittest.mock import patch
 
 from migration import Engine, safe_name, write_json
+from remote_worker import RemoteWorker
 
 
 class EngineTests(unittest.TestCase):
@@ -23,7 +25,7 @@ class EngineTests(unittest.TestCase):
         for value in ['$(id)', '-x', 'test;id', '../file', 'name\nother', '', None]:
             with self.assertRaises(ValueError):
                 safe_name(value)
-        self.assertEqual(safe_name('NicolasAllanot'), 'NicolasAllanot')
+        self.assertEqual(safe_name('example_db'), 'example_db')
 
     def test_private_state_resumes_checkpoint(self):
         self.engine.state.update(version=15, checkpoint='/private/example.dump')
@@ -91,6 +93,41 @@ class EngineTests(unittest.TestCase):
         self.assertFalse(restarted.state['automation']['running'])
         self.assertIn('redémarré', restarted.state['automation']['blocker'])
 
+    def test_zip_path_traversal_is_blocked_before_docker(self):
+        incoming = Path(self.tmp.name) / 'incoming'
+        incoming.mkdir()
+        archive = incoming / 'malicious.upload'
+        with zipfile.ZipFile(archive, 'w') as z:
+            z.writestr('dump.sql', 'SELECT 1;')
+            z.writestr('../escape.txt', 'bad')
+        with patch.object(self.engine, 'start_pg') as pg:
+            with self.assertRaisesRegex(ValueError, 'Chemin dangereux'):
+                self.engine.import_backup({'file': str(archive)})
+            pg.assert_not_called()
+        self.assertFalse((Path(self.tmp.name) / 'escape.txt').exists())
+
+    def test_imported_dump_seeds_isolated_checkpoint(self):
+        incoming = Path(self.tmp.name) / 'incoming'
+        incoming.mkdir()
+        archive = incoming / 'valid.upload'
+        with zipfile.ZipFile(archive, 'w') as z:
+            z.writestr('dump.sql', 'SELECT 1;')
+            z.writestr('filestore/ab/attachment', b'file')
+        def dump(container, db, target):
+            Path(target).write_bytes(b'PGDMP-example')
+        with patch.object(self.engine, 'start_pg', return_value={'db': 'omig-test-db'}), \
+             patch.object(self.engine, 'run', return_value=''), \
+             patch.object(self.engine, 'sql', return_value='12.0.1.3'), \
+             patch.object(self.engine, 'metrics', return_value={'contacts': '10'}), \
+             patch.object(self.engine, 'modules', return_value=[{'name': 'base', 'state': 'installed'}]), \
+             patch.object(self.engine, 'dump', side_effect=dump):
+            self.engine.import_backup({'file': str(archive)})
+        self.assertTrue(self.engine.state['imported'])
+        self.assertEqual(self.engine.state['source']['database'], 'migration')
+        self.assertEqual(self.engine.state['version'], 12)
+        self.assertEqual((Path(self.engine.state['data']) / 'filestore/migration/ab/attachment').read_bytes(), b'file')
+        self.assertTrue(Path(self.engine.state['checkpoint']).is_file())
+
     def test_coverage_acknowledgement_required(self):
         self.engine.state['prepared'] = {'target': 13, 'missing': []}
         with patch.object(self.engine, 'run', return_value=''), patch.object(self.engine, 'start_pg') as pg:
@@ -110,7 +147,7 @@ class EngineTests(unittest.TestCase):
                 self.engine.migrate({'ack_coverage': True})
 
     def test_backup_failure_restarts_production(self):
-        self.engine.state.update(source={'app': 'odoo12', 'db': 'odoo12-db', 'database': 'NicolasAllanot'},
+        self.engine.state.update(source={'app': 'odoo', 'db': 'postgres', 'database': 'example_db'},
                                  audit={'data_dir': '/var/lib/odoo', 'addons_paths': []})
         commands = []
         def run(args, **kwargs):
@@ -118,12 +155,12 @@ class EngineTests(unittest.TestCase):
             return ''
         with patch.object(self.engine, 'inspect', return_value={'State': {'Running': True}}), \
              patch.object(self.engine, 'run', side_effect=run), \
-             patch.object(self.engine, 'sql', return_value='NicolasAllanot'), \
+             patch.object(self.engine, 'sql', return_value='example_db'), \
              patch.object(self.engine, 'dump', side_effect=RuntimeError('simulated backup failure')):
             with self.assertRaisesRegex(RuntimeError, 'simulated'):
                 self.engine.backup({'ack_pause': True})
-        self.assertIn(['docker', 'stop', '--time', '90', 'odoo12'], commands)
-        self.assertEqual(commands[-1], ['docker', 'start', 'odoo12'])
+        self.assertIn(['docker', 'stop', '--time', '90', 'odoo'], commands)
+        self.assertEqual(commands[-1], ['docker', 'start', 'odoo'])
         self.assertIsNone(self.engine.state['backup'])
 
     def test_corrupt_checkpoint_blocks_restore_before_docker(self):
@@ -230,6 +267,34 @@ class EngineTests(unittest.TestCase):
         self.assertEqual(self.engine.state['version'], 12)
         self.assertTrue(self.engine.state['validated'])
         self.assertIsNone(self.engine.state['pending'])
+
+
+class RemoteWorkerTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.worker = RemoteWorker(self.tmp.name, 'https://private.example', 'a'*64, 'service-secret')
+
+    def test_pairing_and_https_required(self):
+        with self.assertRaises(ValueError):
+            RemoteWorker(self.tmp.name, 'http://private.example', 'a'*64, 'service')
+        with self.assertRaises(ValueError):
+            RemoteWorker(self.tmp.name, 'https://private.example', 'short', 'service')
+        with self.assertRaises(ValueError):
+            RemoteWorker(self.tmp.name, 'https://private.example', 'a'*64, '')
+
+    def test_agent_patch_stays_in_version_addons_directory(self):
+        engine = Engine(Path(self.tmp.name) / 'job')
+        with patch.object(self.worker, 'request', return_value={'files': [
+            {'path': '13/module_name/migrations/13.0.1.0/post-migration.py', 'content': 'pass\n'}]}):
+            self.assertEqual(self.worker.apply_patches('a'*32, engine), 1)
+        path = engine.root / 'extra/13/module_name/migrations/13.0.1.0/post-migration.py'
+        self.assertEqual(path.read_text(), 'pass\n')
+        with patch.object(self.worker, 'request', return_value={'files': [
+            {'path': '13/../../outside.py', 'content': 'pass'}]}):
+            with self.assertRaisesRegex(ValueError, 'refusé'):
+                self.worker.apply_patches('a'*32, engine)
+        self.assertFalse((Path(self.tmp.name) / 'outside.py').exists())
 
 
 class HTTPTests(unittest.TestCase):

@@ -14,9 +14,11 @@ import subprocess
 import threading
 import time
 import urllib.parse
+import zipfile
 
 HERE = Path(__file__).resolve().parent
 NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,80}$")
+MAX_UPLOAD_BYTES = 10 * 1024**3
 METRICS = {
     "contacts": "SELECT count(*) FROM res_partner",
     "utilisateurs": "SELECT count(*) FROM res_users",
@@ -63,7 +65,7 @@ class Engine:
             self.state["automation"] = {"running": False, "stage": "Interrompue",
                 "blocker": "L'assistant a redémarré pendant une opération. Vérifier les conteneurs et relancer l'automatisation."}
             self.save()
-        self.source = {"app": "odoo12", "db": "odoo12-db", "database": "NicolasAllanot"}
+        self.source = {"app": "odoo", "db": "postgres", "database": "odoo"}
 
     def save(self):
         write_json(self.statefile, self.state)
@@ -234,6 +236,80 @@ class Engine:
             self.state["modules"] = modules
             self.save()
             self.log("Sauvegarde capturée. La restauration sera testée sur PostgreSQL isolé avant migration.")
+
+    def import_backup(self, payload):
+        """Importe une sauvegarde Odoo 12 dans un PostgreSQL de travail, sans production."""
+        if self.state.get("backup"):
+            raise ValueError("Une source est déjà enregistrée. Utiliser un nouveau dossier de travail.")
+        incoming = (self.root / "incoming").resolve()
+        path = Path(str(payload.get("file", ""))).resolve()
+        if path.parent != incoming or not path.is_file():
+            raise ValueError("Fichier de sauvegarde absent du dossier incoming.")
+        folder = self.root / "backups" / ("import-" + secrets.token_hex(6))
+        folder.mkdir(parents=True, mode=0o700)
+        data = folder / "data" / "filestore" / "migration"
+        data.mkdir(parents=True)
+        sql_file = None
+        archive = None
+        if zipfile.is_zipfile(path):
+            archive = zipfile.ZipFile(path)
+            entries = archive.infolist()
+            if len(entries) > 100000 or sum(i.file_size for i in entries) > MAX_UPLOAD_BYTES:
+                raise ValueError("Archive trop volumineuse ou trop de fichiers.")
+            for member in entries:
+                parts = Path(member.filename).parts
+                if not parts or any(part in (".", "..") for part in parts) or member.filename.startswith("/"):
+                    raise ValueError("Chemin dangereux dans l'archive.")
+                if (member.external_attr >> 16) & 0o170000 == 0o120000:
+                    raise ValueError("Liens symboliques interdits dans l'archive.")
+                if member.is_dir():
+                    continue
+                if member.filename in ("dump.sql", "dump.dump", "database.dump"):
+                    sql_file = folder / member.filename
+                    with archive.open(member) as src, sql_file.open("wb") as dst:
+                        shutil.copyfileobj(src, dst)
+                elif parts[0] == "filestore" and len(parts) > 1:
+                    rel = Path(*parts[1:])
+                    dest = data / rel
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    with archive.open(member) as src, dest.open("wb") as dst:
+                        shutil.copyfileobj(src, dst)
+        else:
+            with path.open("rb") as f:
+                if f.read(5) != b"PGDMP":
+                    raise ValueError("Format accepté : sauvegarde Odoo ZIP ou pg_dump personnalisé (PGDMP).")
+            sql_file = folder / "database.dump"
+            shutil.copy2(path, sql_file)
+        if not sql_file or not sql_file.is_file():
+            raise ValueError("dump.sql ou database.dump manquant dans l'archive.")
+        work = self.start_pg(13, "import-" + secrets.token_hex(6))
+        self.run(["docker", "cp", str(sql_file), work["db"] + ":/tmp/input.dump"])
+        if sql_file.suffix == ".sql":
+            self.run(["docker", "exec", work["db"], "psql", "-X", "-v", "ON_ERROR_STOP=1",
+                      "-U", "odoo", "-d", "migration", "-f", "/tmp/input.dump"])
+        else:
+            self.run(["docker", "exec", work["db"], "pg_restore", "--exit-on-error", "--no-owner",
+                      "--no-acl", "-U", "odoo", "-d", "migration", "/tmp/input.dump"])
+        actual = self.sql(work["db"], "migration", "SELECT latest_version FROM ir_module_module WHERE name='base'")
+        if not actual.startswith("12."):
+            raise ValueError("Le dump n'est pas une base Odoo 12 initialisée : " + actual)
+        metrics = self.metrics(work["db"], "migration")
+        modules = self.modules(work["db"], "migration")
+        checkpoint = folder / "source.dump"
+        self.dump(work["db"], "migration", checkpoint)
+        h = hashlib.sha256()
+        with checkpoint.open("rb") as f:
+            for block in iter(lambda: f.read(1024 * 1024), b""):
+                h.update(block)
+        write_json(folder / "manifest.json", {"sha256": {checkpoint.name: h.hexdigest()},
+            "metrics": metrics, "modules": modules, "filestore_files": sum(1 for p in data.rglob("*") if p.is_file())})
+        self.state.update(source={"database": "migration"}, audit={"source": "archive Odoo 12",
+            "version": actual, "modules": modules, "disk_free_gib": round(shutil.disk_usage(self.root).free / 2**30, 1)},
+            backup=str(folder), checkpoint=str(checkpoint), data=str(folder / "data"),
+            metrics=metrics, modules=modules, imported=True)
+        self.save()
+        self.log("Dump Odoo 12 importé sur une base isolée. Pièces jointes : " +
+                 str(sum(1 for p in data.rglob("*") if p.is_file())))
 
     def git_clone(self, url, branch, path):
         if not path.exists():
@@ -568,9 +644,9 @@ print(json.dumps({'modules':mods,'paths':sorted(paths)}))
         auto = self.state["automation"] = {"running": True, "stage": "Diagnostic", "blocker": None}
         self.save()
         try:
-            if not self.state.get("audit"):
+            if not self.state.get("audit") and not self.state.get("imported"):
                 self.audit(payload)
-            if not self.state.get("backup"):
+            if not self.state.get("backup") and not self.state.get("imported"):
                 auto["stage"] = "Sauvegarde de production"
                 self.save()
                 self.backup({"ack_pause": True})
@@ -629,7 +705,7 @@ print(json.dumps({'modules':mods,'paths':sorted(paths)}))
             self.save()
 
     def dispatch(self, action, payload):
-        if action not in ("audit", "backup", "prepare", "migrate", "preview", "validate", "retry", "autopilot"):
+        if action not in ("audit", "backup", "import_backup", "prepare", "migrate", "preview", "validate", "retry", "autopilot"):
             raise ValueError("Action inconnue")
         if not self.lock.acquire(blocking=False):
             raise ValueError("Une opération est déjà en cours.")
@@ -709,6 +785,24 @@ def main():
                 return
             try:
                 length = int(self.headers.get("Content-Length", "0"))
+                if urllib.parse.urlparse(self.path).path == "/api/upload":
+                    if not 0 < length <= MAX_UPLOAD_BYTES or engine.busy or engine.state.get("backup"):
+                        raise ValueError("Import impossible : taille invalide, opération active ou sauvegarde déjà présente.")
+                    incoming = engine.root / "incoming"
+                    incoming.mkdir(parents=True, exist_ok=True, mode=0o700)
+                    dest = incoming / (secrets.token_hex(16) + ".upload")
+                    with dest.open("wb") as f:
+                        remaining = length
+                        while remaining:
+                            block = self.rfile.read(min(1024 * 1024, remaining))
+                            if not block:
+                                raise ValueError("Téléversement interrompu.")
+                            f.write(block)
+                            remaining -= len(block)
+                    os.chmod(dest, 0o600)
+                    engine.dispatch("import_backup", {"file": str(dest)})
+                    self.send(202, {"ok": True, "message": "Import du dump démarré"})
+                    return
                 if not 0 < length <= 100000:
                     raise ValueError("Taille invalide")
                 payload = json.loads(self.rfile.read(length))
@@ -721,6 +815,8 @@ def main():
                 self.send(400, {"error": str(error)})
     print("Assistant : http://127.0.0.1:" + str(args.port) + "/#" + token, flush=True)
     print("Pour un accès distant : tunnel SSH vers les ports " + str(args.port) + " et 18069.", flush=True)
+    from remote_worker import start_if_configured
+    start_if_configured(engine.root)
     http.server.ThreadingHTTPServer((args.bind, args.port), Handler).serve_forever()
 
 

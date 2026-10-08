@@ -11,6 +11,9 @@ services:
       DOCKER_HOST: unix:///var/run/docker.sock
       PYTHONDONTWRITEBYTECODE: "1"
       HOME: ${ODOO_MIGRATION_HOME:-/opt/odoo-migration}/.home
+      MIGRATION_PLUGIN_SITE_URL: ${MIGRATION_PLUGIN_SITE_URL:-}
+      MIGRATION_PLUGIN_TOKEN: ${MIGRATION_PLUGIN_TOKEN:-}
+      MIGRATION_PLUGIN_SERVICE_TOKEN: ${MIGRATION_PLUGIN_SERVICE_TOKEN:-}
     ports:
       - "127.0.0.1:8765:8765"
     volumes:

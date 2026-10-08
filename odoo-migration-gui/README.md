@@ -23,6 +23,22 @@ ssh -L 8765:127.0.0.1:8765 -L 18069:127.0.0.1:18069 utilisateur@serveur
 
 Ouvrir ensuite le lien complet du journal dans le navigateur du poste possédant le tunnel. Garder le tunnel ouvert pendant l'utilisation.
 
+## Plugin ChatGPT avec un dump
+
+Le [plugin privé Agent migration Odoo](https://migration-odoo-agent.n-allanot.chatgpt.site) peut créer un travail, recevoir une sauvegarde et suivre la migration depuis ChatGPT. Le ZIP de sauvegarde Odoo doit contenir `dump.sql` et, si des pièces jointes existent, `filestore/`. Un dump PostgreSQL au format personnalisé (`pg_dump -Fc`) est aussi accepté, mais ne contient pas le filestore. La taille maximale est de 10 Gio.
+
+Pour relier ce plugin à la stack Docker, définir les variables suivantes dans les secrets ou l'environnement du gestionnaire de stack, puis redéployer `docker-compose.assistant.yml` :
+
+```text
+MIGRATION_PLUGIN_SITE_URL=https://migration-odoo-agent.n-allanot.chatgpt.site
+MIGRATION_PLUGIN_TOKEN=<code généré par l'outil create_worker_pairing_code du plugin>
+MIGRATION_PLUGIN_SERVICE_TOKEN=<jeton d'accès de service du Site privé>
+```
+
+Ne placer aucun de ces jetons dans Git. Le conteneur interroge le plugin par HTTPS ; aucun port entrant public n'est nécessaire. Dans ChatGPT, créer un travail avec `create_migration`, ouvrir son lien d'envoi, fournir le dump, puis le mettre en file avec `queue_migration`. `get_migration` affiche le journal, le stade et les blocages. Un fichier de module préparé dans le chat peut être ajouté avec `add_migration_file` ; relancer ensuite le travail avec `queue_migration`. `delete_migration` supprime le dump et les fichiers hébergés du plugin. Les copies locales se trouvent dans `<dossier_de_travail>/jobs/<id>/` et se nettoient séparément après vérification.
+
+Le moteur importe la sauvegarde sur une copie PostgreSQL isolée et sauvegarde un premier point de reprise avant les migrations. Il s'arrête aux erreurs et aux modules sans adaptation fiable. La mise en production et la validation métier restent à organiser après examen de la copie finale.
+
 ## Lancement automatique
 
 Saisir les noms des deux conteneurs et de la base dans le diagnostic, puis cocher l'autorisation de sauvegarde. Le bouton « Tout lancer automatiquement » enchaîne les étapes de la version 12 jusqu'à la version 19. La capture initiale arrête temporairement l'application source pour garder la base et les fichiers synchronisés, puis la redémarre. Les migrations suivantes utilisent seulement des copies isolées.

@@ -44,3 +44,8 @@ git clone -b 18.0 https://github.com/OCA/OpenUpgrade.git openupgrade_18
 
 Chaque clé est optionnelle et possède une valeur par défaut. La liste
 `versions` définit la séquence de mises à jour OpenUpgrade appliquées.
+
+
+## Assistant graphique pour Odoo 12 → 19
+
+L'assistant local guidé est disponible dans [odoo-migration-gui](odoo-migration-gui/README.md). Il sauvegarde l'instance Docker, prépare les étapes OpenUpgrade sur des copies isolées et demande une validation de chaque version. Démarrage sur le serveur : `cd odoo-migration-gui && ./lancer.sh`. Le parcours historique ci-dessus reste disponible séparément.

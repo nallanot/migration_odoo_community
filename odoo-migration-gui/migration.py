@@ -366,7 +366,10 @@ for root in roots:
 print(json.dumps({'modules':mods,'paths':sorted(paths)}))
 """.replace("VERSION", str(version))
         inventory = json.loads(self.run(["docker", "run", "--rm", "--network", "none", "--entrypoint", "python3", image_id, "-c", script], quiet=True))
-        installed = [m["name"] for m in self.state["modules"]]
+        installed = [
+            m["name"] for m in self.state["modules"]
+            if m.get("state") == "installed"
+        ]
         missing = sorted(set(installed) - set(inventory["modules"]))
         external_modules = [m for m in installed if inventory["modules"].get(m, {}).get("external")]
         # Source des fusions/renommages connue pour les branches modernes.

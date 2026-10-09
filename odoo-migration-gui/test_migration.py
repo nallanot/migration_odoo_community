@@ -35,6 +35,28 @@ class EngineTests(unittest.TestCase):
         self.assertEqual(resumed.state['checkpoint'], '/private/example.dump')
         self.assertEqual(os.stat(self.engine.statefile).st_mode & 0o777, 0o600)
 
+    def test_prepare_inventory_only_installed_modules(self):
+        self.engine.state.update(
+            version=12, backup='/backup', validated=True,
+            modules=[
+                {'name': 'base', 'state': 'installed'},
+                {'name': 'legacy_removed', 'state': 'uninstallable'},
+            ],
+        )
+        inventory = {'modules': {'base': {'external': False}}, 'paths': ['/opt/OpenUpgrade']}
+        def fake_run(args, **kwargs):
+            if args[:2] == ['docker', 'image']:
+                return 'sha256:test'
+            if args[:2] == ['docker', 'run']:
+                return json.dumps(inventory)
+            return ''
+        with patch.object(self.engine, 'git_clone', return_value='sha'), \
+             patch.object(self.engine, 'run', side_effect=fake_run), \
+             patch.object(self.engine, 'save'), \
+             patch('pathlib.Path.rglob', return_value=[]):
+            self.engine.prepare({})
+        self.assertEqual(self.engine.state['prepared']['missing'], [])
+
     def test_missing_module_cannot_be_silently_ignored(self):
         self.engine.state['prepared'] = {'target': 13, 'missing': ['om_account_asset']}
         with patch.object(self.engine, 'run', return_value=''), patch.object(self.engine, 'start_pg') as pg:
